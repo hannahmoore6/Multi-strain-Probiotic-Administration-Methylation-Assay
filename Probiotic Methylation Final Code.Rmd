@@ -1,0 +1,305 @@
+---
+title: "Probiotic Methylation Final Code"
+output: html_document
+date: "2024-09-25"
+---
+
+
+```{r setting up sesame notes}
+BiocManager::install("sesame") #install sesame
+sesameDataCache() # needs to be run once per install
+```
+```{r load packages}
+library(tidyverse)
+library(ggpubr)
+library(stringr)
+library(sesame)
+library(SummarizedExperiment)
+```
+
+#QC filter and generate betas
+```{r set up directory locations}
+idat_dir = paste0(data_dir, "207592480012/") 
+```
+```{r get betas}
+betas = openSesame(idat_dir, prep = "QCDPB") #generates betas while also running several important QC measures
+```
+```{r generate QC stats and put them in dataframe}
+qcs <- openSesame(idat_dir, prep = "", func = sesameQC_calcStats)
+qc_df <- do.call(rbind, lapply(qcs, as.data.frame))
+```
+```{r data was given to us in 2 runs, this is the second run}
+idat_dir_2 <- paste0(data_dir, "207656680039/")
+betas_2 = openSesame(idat_dir_2, prep = "QCDPB")
+qcs_2 <- openSesame(idat_dir_2, prep = "", func = sesameQC_calcStats)
+qcs_2_df <- do.call(rbind, lapply(qcs_2, as.data.frame))
+```
+```{r add group names data}
+names_1 <- as.data.frame(rownames(qc_df)) #make data frame of data rownames
+names_2 <- as.data.frame(rownames(qcs_2_df))
+names(names_1)[1] <- "group" #rename column
+names(names_2)[1] <- "group"
+names <- bind_rows(names_1, names_2) #combine dataframes together
+
+new_ids <- data.frame(group_id = c("NEC", "NEC_Pan", "NEC", "BF_Pan", "NEC", "BF_Pan", "NEC", "BF_Pan", "NEC_Pan", "HiCtrl", "NEC_Pan", "LoCtrl", "Pbx", "BF", "Pbx", "BF", "Pbx", "NEC_Pbx", "Pbx", "NEC_Pbx", "BF", "NEC_Pbx", "BF", "NEC_Pbx"), mouse_id = c(13, 19, 14, 20, 15, 21, 16, 22, 17, 24, 18, 23, 1, 7, 2, 8, 3, 9, 4, 10, 5, 11, 6, 12)) #create dataframe with 2 columns: group_id and mouse_id
+
+names <- names %>% rownames_to_column() 
+new_ids <- new_ids %>% rownames_to_column()
+names_ids <- names %>% inner_join(new_ids) #combined rownames from data with names and ids from manually made dataframe. joined by rownames, which is index since they are the same length and I created the dataframe to be in the same order
+
+qc_df <- qc_df %>% rownames_to_column(var = "group")
+qcs_2_df <- qcs_2_df %>% rownames_to_column(var = "group")
+qcs <- bind_rows(qc_df, qcs_2_df)
+qcs <- qcs %>% left_join(names_ids) #final is a dataframe with QC stats for all samples, annotated with group names
+
+rm(qc_df)
+rm(qcs_2_df)
+rm(names)
+rm(new_ids)
+rm(names_ids)
+rm(names_1)
+rm(names_2) #remove unnecessary objects from environment to clean up
+```
+```{r load sigdfs with qc stats from core}
+sdf <- openSesame(idat_dir, func = NULL)
+sdf_2 <- openSesame(idat_dir_2, func = NULL)
+
+#add names to sdfs 
+names(sdf) <- c("NEC_13", "NEC_Pan_19", "NEC_14", "BF_Pan_20", "NEC_15", "BF_Pan_21", "NEC_16", "BF_Pan_22", "NEC_Pan_17", "HiCtrl_24", "NEC_Pan_18", "LoCtrl_23")
+names(sdf_2) <- c("Pbx_1", "BF_7", "Pbx_2", "BF_8", "Pbx_3", "NEC_Pbx_9", "Pbx_4", "NEC_Pbx_10", "BF_5", "NEC_Pbx_11", "BF_6", "NEC_Pbx_12")
+
+#generate bar plot of detection levels for each sample
+sesameQC_plotBar(lapply(sdf, sesameQC_calcStats, "detection"))
+ggsave(paste0(data_dir, "QC/sdf_1_bar.png"), width = 200, height = 125, units = "mm", dpi = 300)
+
+sesameQC_plotBar(lapply(sdf_2, sesameQC_calcStats, "detection"))
+ggsave(paste0(data_dir, "QC/sdf_2_bar.png"), width = 200, height = 125, units = "mm", dpi = 300)
+
+#plot dye bias for each sample in each sdf 
+sesameQC_plotRedGrnQQ(sdf_2$NEC_Pbx_12) 
+
+#plot relationship between B values and signal intensity: can determine artificial readout and signal background
+sesameQC_plotIntensVsBetas(sdf$HiCtrl_24)
+```
+```{r rename columns in betas to groups}
+colnames(betas) <- c("NEC_13", "NEC_Pan_19", "NEC_14", "BF_Pan_20", "NEC_15", "BF_Pan_21", "NEC_16", "BF_Pan_22", "NEC_Pan_17", "HiCtrl_24", "NEC_Pan_18", "LoCtrl_23")
+colnames(betas_2) <- c("Pbx_1", "BF_7", "Pbx_2", "BF_8", "Pbx_3", "NEC_Pbx_9", "Pbx_4", "NEC_Pbx_10", "BF_5", "NEC_Pbx_11", "BF_6", "NEC_Pbx_12")
+```
+```{r combine betas into one big dataframe and make rowname a column so it isn't lost in export}
+betas <- as.data.frame(betas)
+betas_2 <- as.data.frame(betas_2)
+betas <- betas %>% rownames_to_column(var = "cpg_site")
+betas_2 <- betas_2 %>% rownames_to_column(var = "cpg_site")
+all_betas <- betas %>% inner_join(betas_2)
+all_betas <- all_betas %>% column_to_rownames(var = "cpg_site")
+```
+```{r separate betas by experiment and save}
+nec_ctrl <- all_betas %>% select("NEC_13", "NEC_14", "NEC_15", "NEC_16", "BF_5", "BF_6", "BF_7", "BF_8", "HiCtrl_24", "LoCtrl_23")
+probiotics <- all_betas %>% select("Pbx_1", "Pbx_2", "Pbx_3", "Pbx_4", "NEC_Pbx_9", "NEC_Pbx_10", "NEC_Pbx_11", "NEC_Pbx_12",  "NEC_13", "NEC_14", "NEC_15", "NEC_16", "BF_5", "BF_6", "BF_7", "BF_8", "HiCtrl_24", "LoCtrl_23")
+
+write.csv(nec_ctrl, paste0(data_dir, "nec_ctrl_betas.csv"))
+write.csv(probiotics, paste0(data_dir, "probiotics_betas.csv"))
+```
+
+#analyze betas
+```{r laod more packages}
+library(ComplexHeatmap)
+library(rstatix)
+library(EnhancedVolcano)
+```
+```{r load data}
+#load betas
+nec_ctrl <- read.csv(paste0(data_dir, "nec_ctrl_betas.csv"), row.names = 1)
+probiotics <- read.csv(paste0(data_dir, "probiotics_betas.csv"), row.names = 1)
+#make matrices
+nec_ctrl_mat <- as.matrix(nec_ctrl)
+probiotics_mat <- as.matrix(probiotics)
+```
+```{r use sesame linear regression model to identify differential methylation}
+#create data frame to add group id to samples 
+broad_groups <- data.frame(group_id = c("Pbx_1", "Pbx_2", "Pbx_3", "Pbx_4", "BF_5", "BF_6", "BF_7", "BF_8", "NEC_Pbx_9", "NEC_Pbx_10", "NEC_Pbx_11", "NEC_Pbx_12", "NEC_13", "NEC_14", "NEC_15", "NEC_16", "LoCtrl_23", "HiCtrl_24"), group=c("Pbx", "Pbx", "Pbx", "Pbx", "BF", "BF", "BF", "BF", "NEC_Pbx", "NEC_Pbx", "NEC_Pbx", "NEC_Pbx", "NEC", "NEC", "NEC", "NEC", "LoCtrl", "HiCtrl"))
+
+#need to convert data into summarized experiment objects to run this
+#create column names data frame for each project
+colnames_nc <- as.data.frame(colnames(nec_ctrl_mat))
+names(colnames_nc)[1] <- "group_id"
+colnames_nc <- colnames_nc %>% left_join(broad_groups)
+
+colnames_pbx <- as.data.frame(colnames(probiotics_mat))
+names(colnames_pbx)[1] <- "group_id"
+colnames_pbx <- colnames_pbx %>% left_join(broad_groups)
+
+#load and format row metadata -> these files were included from the core
+mousemethylation_clean <- read_csv("data/mousemethylation_clean.csv")
+MouseMethylation_12v1_0_A1_Annotation_Mus_musculus <- read_csv("data/MouseMethylation-12v1-0_A1_Annotation_Mus_musculus.csv")
+
+MouseMethylation_12v1_0_A1_Annotation_Mus_musculus <- MouseMethylation_12v1_0_A1_Annotation_Mus_musculus %>% select(name, Gene, chrom, Feature, chromStrand)
+MouseMethylation_12v1_0_A1_Annotation_Mus_musculus <- unique(MouseMethylation_12v1_0_A1_Annotation_Mus_musculus)
+
+names(mousemethylation_clean)[2] <- "name"
+mousemethylation_clean <- left_join(mousemethylation_clean, MouseMethylation_12v1_0_A1_Annotation_Mus_musculus, multiple = "any")
+
+#annotation files for each project
+nec_ctrl_names <-as.data.frame(rownames(nec_ctrl_mat))
+names(nec_ctrl_names)[1] <- "IlmnID"
+nec_ctrl_names <- left_join(nec_ctrl_names, mousemethylation_clean)
+
+pbx_names <- as.data.frame(rownames(probiotics_mat))
+names(pbx_names)[1] <- "IlmnID"
+pbx_names <- pbx_names %>% left_join(mousemethylation_clean)
+
+#create summarized experiment file
+nec_ctrl_assay <- SummarizedExperiment(assays = list(counts=nec_ctrl_mat), colData = colnames_nc, rowData = nec_ctrl_names)
+probiotics_assay <- SummarizedExperiment(assays = list(counts=probiotics_mat), colData = colnames_pbx, rowData = pbx_names)
+
+#remove NAs and determine differentially methylated regions: nec v ctrl
+nc_okay = (checkLevels(assay(nec_ctrl_assay), colData(nec_ctrl_assay)$group) & checkLevels(assay(nec_ctrl_assay), colData(nec_ctrl_assay)$group_id))
+nec_ctrl_assay = nec_ctrl_assay[nc_okay,]
+colData(nec_ctrl_assay)$group <- relevel(factor(colData(nec_ctrl_assay)$group), "BF")
+smry_nc = DML(nec_ctrl_assay, ~group)
+nc_result <- summaryExtractTest(smry_nc)
+
+#probiotics: pbx as base group (necpxv v pbx, nec v pbx etc)
+pbx_p_okay = (checkLevels(assay(probiotics_assay), colData(probiotics_assay)$group) & checkLevels(assay(probiotics_assay), colData(probiotics_assay)$group_id))
+probiotics_assay = probiotics_assay[pbx_p_okay,]
+colData(probiotics_assay)$group <- relevel(factor(colData(probiotics_assay)$group), "Pbx")
+smry_pbx_p = DML(probiotics_assay, ~group)
+pbx_p_result <- summaryExtractTest(smry_pbx_p)
+
+#probiotics: nec as base group 
+pbx_n_okay = (checkLevels(assay(probiotics_assay), colData(probiotics_assay)$group) & checkLevels(assay(probiotics_assay), colData(probiotics_assay)$group_id))
+probiotics_assay = probiotics_assay[pbx_n_okay,]
+colData(probiotics_assay)$group <- relevel(factor(colData(probiotics_assay)$group), "NEC")
+smry_pbx_n = DML(probiotics_assay, ~group)
+pbx_n_result <- summaryExtractTest(smry_pbx_n)
+
+#probiotics: ctrl as base group
+pbx_b_okay = (checkLevels(assay(probiotics_assay), colData(probiotics_assay)$group) & checkLevels(assay(probiotics_assay), colData(probiotics_assay)$group_id))
+probiotics_assay = probiotics_assay[pbx_b_okay,]
+colData(probiotics_assay)$group <- relevel(factor(colData(probiotics_assay)$group), "BF")
+smry_pbx_b = DML(probiotics_assay, ~group)
+pbx_b_result <- summaryExtractTest(smry_pbx_b)
+```
+```{r examine changes in methylation by region -> are there chunks that have coordinated changes in methylation}
+merged_nc <- DMR(nec_ctrl_assay, smry_nc, "groupNEC")
+
+colData(probiotics_assay)$group <- relevel(factor(colData(probiotics_assay)$group), "BF")
+merged_pbx_bf <- DMR(probiotics_assay, smry_pbx_b, "groupPbx")
+
+colData(probiotics_assay)$group <- relevel(factor(colData(probiotics_assay)$group), "NEC")
+merged_necpbx_nec <- DMR(probiotics_assay, smry_pbx_n, "groupNEC_Pbx")
+
+colData(probiotics_assay)$group <- relevel(factor(colData(probiotics_assay)$group), "Pbx")
+merged_necpbx_pbx <- DMR(probiotics_assay, smry_pbx_p, "groupNEC_Pbx")
+
+#save
+write_csv(merged_nc, paste0(data_dir, "nec_ctrl_dmr.csv"))
+write_csv(merged_necpbx_nec, paste0(data_dir, "necpbx_nec_dmr.csv"))
+write_csv(merged_necpbx_pbx, paste0(data_dir, "necpbx_pbx_dmr.csv"))
+write_csv(merged_pbx_bf, paste0(data_dir, "pbx_bf_dmr.csv"))
+```
+```{r save summarized experiment objects as r objects and save results of differential methylation}
+saveRDS(nec_ctrl_assay, paste0(data_dir, "nec_ctrl_obj.Rds"))
+saveRDS(probiotics_assay, paste0(data_dir, "probiotics_obj.Rds"))
+
+write_csv(nc_result, paste0(data_dir, "nec_ctrl_results.csv"))
+write_csv(pbx_n_result, paste0(data_dir, "probiotics_nec_results.csv"))
+write_csv(pbx_b_result, paste0(data_dir, "probiotics_bf_results.csv"))
+write_csv(pbx_p_result, paste0(data_dir, "probiotics_pbx_results.csv"))
+```
+
+#make plots
+```{r nec v ctrl}
+#load necessary objects - would have cleared environment
+nec_ctrl_obj <- readRDS(paste0(data_dir, "nec_ctrl_obj.Rds"))
+nec_ctrl_results <- read_csv(paste0(data_dir, "nec_ctrl_results.csv"))
+
+#pull matrices and location data 
+nec_ctrl_betas <- assays(nec_ctrl_obj)$count # pull matrix
+probe_metadata <- as.data.frame(nec_ctrl_obj@elementMetadata@listData) #location data 
+probe_metadata <- probe_metadata %>% select(IlmnID, Feature) #select columns of interest
+nec_ctrl_betas <- as.data.frame(nec_ctrl_betas) %>% rownames_to_column(var = 'IlmnID') #take rownames to column so it can be used to join 
+nec_ctrl_betas <- nec_ctrl_betas %>% left_join(probe_metadata) #join feature info into betas using IlmnID 
+nec_ctrl_betas$nec_mean <- rowMeans(nec_ctrl_betas[ , c(2,3,4,5)], na.rm = TRUE) #get means of nec columns
+nec_ctrl_betas$bf_mean <- rowMeans(nec_ctrl_betas[ , c(6, 7, 8, 9)], na.rm = TRUE) #means of bf columns
+nec_ctrl_vln_data <- nec_ctrl_betas %>% select(nec_mean, bf_mean, IlmnID, Feature) #columns needed for violin plot
+nec_ctrl_vln_data <- nec_ctrl_vln_data %>% gather(key = "group", value = "mean_beta", nec_mean, bf_mean) #convert data to long format for violin plot
+
+stat_test <- nec_ctrl_vln_data %>% 
+  group_by(Feature) %>%
+  t_test(mean_beta ~ group) %>%
+  adjust_pvalue(method = "bonferroni") %>%
+  add_significance("p.adj") #generate statistics for difference between NEC and BF for each feature location
+
+ggplot(nec_ctrl_vln_data, aes(fill = group, x = Feature, y = mean_beta))+
+  geom_violin(position = 'dodge') +
+  geom_boxplot(position = position_dodge(width = 0.9), alpha = 0.2, width = 0.07) 
+ggsave(paste0(figure_dir, "feature_violin.png"), width = 500, height = 250, dpi = 300, units = "mm") #violin plot of nec v bf for each feature
+
+nec_ctrl_results <- nec_ctrl_results %>% 
+  mutate(diff = case_when(Est_groupNEC < -.1 & Pval_groupNEC < 0.05 ~ "hypomethylated", Est_groupNEC > 0.1 & Pval_groupNEC < 0.05 ~ "hypermethylated", .default = "not significant")) #create column that labels significant sites
+
+ggplot(nec_ctrl_results, aes(x=Est_groupNEC, y=-log10(Pval_groupNEC), col=diff)) +
+  geom_point() +
+  scale_color_manual(values = c("red", "blue", "black")) +
+  geom_vline(xintercept = c(-.1, .1), col="red") +
+  geom_hline(yintercept = -log10(0.05), col="red")
+ggsave(paste0(figure_dir, "volacano.png"), width = 250, height = 200, dpi = 300, units = "mm") #volcano plot
+
+#create dataframe of signigicant sites with full metadata
+gene_table <- as.data.frame(nec_ctrl_obj@elementMetadata@listData)
+nec_ctrl_sig <- nec_ctrl_results %>% filter(diff != "not significant")
+nec_ctrl_sig <- nec_ctrl_sig %>% left_join(gene_table, by= c("Probe_ID" = "IlmnID")) 
+
+#barplot of feature frequency for significant sites
+ggplot(nec_ctrl_sig, aes(x=Feature, fill = diff)) + 
+  geom_bar(position = "dodge") 
+ggsave(paste0(figure_dir, "significant_bar_nec_ctrl.png"), width = 300, height = 200, dpi = 300, units = "mm")
+
+#save significant sites
+write_csv(nec_ctrl_sig, paste0(data_dir, "sig_sites_nec_ctrl.csv"))
+```
+*repeat this for: necpbx v nec & necpbx v bf & pbx v bf
+
+#get pathways and genes that have significant changes in methylation nec v ctrl
+```{r load missing packages and locations}
+library(gprofiler2)
+
+data_dir <- "/home/hackam/Documents/Methylation/data/"
+figure_dir <- "/home/hackam/Documents/Methylation/figures/nec_ctrl/"
+```
+```{r}
+sig_df <- read_csv(paste0(data_dir, "sig_sites_nec_ctrl.csv"))
+
+query_hyper <- sig_df %>% filter(diff == "hypermethylated") %>% dplyr::select(Probe_ID) #create list of hypermethylated probes
+query_hypo <- sig_df %>% filter(diff == "hypomethylated") %>% dplyr::select(Probe_ID) #create list of hypomethylated probes
+query_hyper <- query_hyper[["Probe_ID"]] #convert dataframe of probes into vector
+query_hypo <- query_hypo[["Probe_ID"]] #convert dataframe of probes into vector
+
+hyper_gsea <- testEnrichment(query_hyper, KYCG_buildGeneDBs(query_hyper, platform = "MM285"), platform = "MM285") #generate genes from hypermethylated sites
+hyper_gsea <- hyper_gsea %>% filter(p.value < 0.05) #filter for significant genes
+hypo_gsea <- testEnrichment(query_hypo, KYCG_buildGeneDBs(query_hypo, platform = "MM285"), platform = "MM285") #generate genes from hypomethylated sites
+hypo_gsea <- hypo_gsea %>% filter(p.value < 0.05) #filter for significant genes
+
+hyper_genes <- sesameData_getGenesByProbes(query_hyper, platform = "MM285") #create GRanges object with genes near hypermethylated probes
+hypo_genes <- sesameData_getGenesByProbes(query_hypo, platform = "MM285") #create GRanges object with genes near hypomethylated probes
+
+hyper_go <- gost(hyper_genes$gene_name, organism = "mmusculus") #get enriched pathways from hypermethylation gene information
+hypo_go <- gost(hypo_genes$gene_name, organism = "mmusculus") #get enriched pathways from hypomethylated gene information
+
+gostplot(hyper_go) #plot hypermethylated pathways
+gostplot(hypo_go) #plot hypomethylated pathways
+
+hyper_list <- hyper_go[[1]] #make dataframe of pathways
+hypo_list <- hypo_go[[1]] #make dataframe of pathways
+
+#save everything
+write_csv(hyper_list, paste0(data_dir, "nec_ctrl_hypermethylated_gsea.csv"))
+write_csv(hypo_list, paste0(data_dir, "nec_ctrl_hypomethylated_gsea.csv"))
+write_csv(hyper_gsea, paste0(data_dir, "nec_ctrl_hypermethylated_genes.csv"))
+saveRDS(hyper_go, paste0(data_dir, "nec_ctrl_hypermethylated_go.Rds"))
+write_csv(hypo_gsea, paste0(data_dir, "nec_ctrl_hypomethylated_genes.csv"))
+saveRDS(hypo_go, paste0(data_dir, "nec_ctrl_hypomethylated_go.Rds"))
+```
+*then repeated for other project analysis. I did this by clearing the environment and reloading data_dir, figure_dir, and sig_df accordingly, then running the same code, and rewriting the names when saving. 
+
